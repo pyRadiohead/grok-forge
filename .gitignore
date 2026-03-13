@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.vsix
+.vscode-test/
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
