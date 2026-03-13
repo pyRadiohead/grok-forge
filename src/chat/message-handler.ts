@@ -1,5 +1,5 @@
 import { createGrokClient, ChatMessage } from "../api/grok-client";
-import { GrokConfig } from "../config";
+import { GrokConfig, SINGLE_MODEL, MULTI_AGENT_MODEL } from "../config";
 
 export type WebviewMessage =
   | { type: "sendMessage"; text: string; withCodebase?: boolean }
@@ -25,9 +25,14 @@ export function handleMessage(msg: WebviewMessage, ctx: HandlerContext) {
       ctx.abortController?.abort();
       ctx.setAbortController(undefined);
       return;
-    case "updateConfig":
-      ctx.updateConfig(msg.config);
+    case "updateConfig": {
+      const update = { ...msg.config };
+      if ("multiAgent" in update) {
+        update.model = update.multiAgent ? MULTI_AGENT_MODEL : SINGLE_MODEL;
+      }
+      ctx.updateConfig(update);
       return;
+    }
   }
 }
 
