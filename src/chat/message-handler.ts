@@ -95,7 +95,8 @@ async function handleSend(
     },
   }, ac.signal);
 
-  // Aborted path: client returns without calling onFinish or onError
+  // Aborted path: client returns without calling onFinish or onError.
+  // onAssistantFinish is intentionally NOT called here — aborted turns are not persisted to session history.
   if (!settled) {
     ctx.messages.pop();
     if (accumulated) {

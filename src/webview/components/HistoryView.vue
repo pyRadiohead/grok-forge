@@ -44,15 +44,22 @@ function onRenameKeydown(e: KeyboardEvent, sessionId: string) {
   }
 }
 
-// Date grouping
-function formatGroupLabel(dateStr: string): string {
+// Date grouping — uses local date keys (YYYY-MM-DD) to avoid UTC midnight parse issues
+function localDateKey(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function formatGroupLabel(dateKey: string): string {
   const today = new Date();
+  const todayKey = localDateKey(today.getTime());
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
-  const d = new Date(dateStr);
-  if (d.toDateString() === today.toDateString()) return "Today";
-  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const yesterdayKey = localDateKey(yesterday.getTime());
+  if (dateKey === todayKey) return "Today";
+  if (dateKey === yesterdayKey) return "Yesterday";
+  const [y, m, day] = dateKey.split("-").map(Number);
+  return new Date(y, m - 1, day).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function formatTime(ts: number): string {
@@ -72,9 +79,9 @@ interface SessionGroup {
 const grouped = computed<SessionGroup[]>(() => {
   const map = new Map<string, ChatSession[]>();
   for (const s of props.sessions) {
-    const dateStr = new Date(s.createdAt).toDateString();
-    if (!map.has(dateStr)) map.set(dateStr, []);
-    map.get(dateStr)!.push(s);
+    const key = localDateKey(s.createdAt);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(s);
   }
   return Array.from(map.entries()).map(([dateStr, sessions]) => ({
     label: formatGroupLabel(dateStr),
@@ -121,7 +128,7 @@ const grouped = computed<SessionGroup[]>(() => {
               >{{ session.title }}</div>
             </template>
             <div class="session-meta">
-              {{ formatTime(session.createdAt) }} · {{ session.messages.length }} messages
+              {{ formatTime(session.createdAt) }} · {{ session.messages.filter(m => m.role === 'user').length }} messages
             </div>
           </div>
 

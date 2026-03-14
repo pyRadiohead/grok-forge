@@ -155,6 +155,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "renameSession":
         await this.handleRenameSession(msg.sessionId, msg.title);
         return;
+      case "stopGeneration":
+        // Handled inside handleMessage via abortController; fall through to default
+        // so sendSessionsLoaded() fires after abort completes.
+        // falls through
       default: {
         // Create a new session on first message if no active session
         if (msg.type === "sendMessage" && !this.activeSessionId) {
@@ -261,6 +265,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!session) return;
 
     // ChatMessage only has { role, content } — do not include reasoning here.
+    // Note: codebase context is NOT restored when loading a historical session.
+    // If the user wants codebase context, they must re-attach it via the @ button.
     this.messages = session.messages.map(m => ({
       role: m.role,
       content: m.content,
