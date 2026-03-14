@@ -65,7 +65,7 @@ const showDragHandle = computed(() => {
 function clampHeight(h: number): number {
   const panel = panelContainer.value;
   if (!panel) return h;
-  const min = 120;
+  const min = 300;
   const max = panel.offsetHeight - 140;
   if (max < min) return h; // panel too small — don't clamp
   return Math.min(max, Math.max(min, h));
@@ -166,7 +166,7 @@ function handleExtensionMessage(event: MessageEvent) {
       } else {
         nextTick(() => {
           const panel = panelContainer.value;
-          if (panel) applyHeight(Math.floor(panel.offsetHeight * 0.6));
+          if (panel) applyHeight(Math.floor(panel.offsetHeight * 0.85));
         });
       }
       break;
