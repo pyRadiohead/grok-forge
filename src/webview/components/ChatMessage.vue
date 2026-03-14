@@ -77,7 +77,7 @@ const renderedContent = computed(() => {
 }
 
 .message-body {
-  font-size: 13px;
+  font-size: 18px;
   line-height: 1.5;
 }
 
