@@ -7,7 +7,10 @@ export type WebviewMessage =
   | { type: "newChat" }
   | { type: "readCodebase" }
   | { type: "saveSettings"; models: Array<{ title: string; modelId: string; apiKey: string }> }
-  | { type: "saveChatHeight"; height: number };
+  | { type: "saveChatHeight"; height: number }
+  | { type: "loadSession"; sessionId: string }
+  | { type: "deleteSession"; sessionId: string }
+  | { type: "renameSession"; sessionId: string; title: string };
 
 export interface HandlerContext {
   messages: ChatMessage[];
@@ -16,9 +19,10 @@ export interface HandlerContext {
   setAbortController: (ac: AbortController | undefined) => void;
   getRequestConfig: (index: number) => RequestConfig | null;
   getCachedCodebase: () => string | null;
+  onAssistantFinish?: (userText: string, assistantContent: string, reasoning: string) => void;
 }
 
-export function handleMessage(msg: WebviewMessage, ctx: HandlerContext) {
+export async function handleMessage(msg: WebviewMessage, ctx: HandlerContext): Promise<void> {
   switch (msg.type) {
     case "sendMessage":
       return handleSend(msg.text, msg.withCodebase, msg.selectedModelIndex, ctx);
@@ -61,6 +65,7 @@ async function handleSend(
   ctx.postMessage({ type: "assistantStart" });
 
   let accumulated = "";
+  let reasoningAccumulated = "";
   let settled = false;
 
   const client = createGrokClient(requestConfig.apiKey);
@@ -70,6 +75,7 @@ async function handleSend(
       ctx.postMessage({ type: "assistantDelta", delta });
     },
     onReasoning(delta) {
+      reasoningAccumulated += delta;
       ctx.postMessage({ type: "reasoningDelta", delta });
     },
     onFinish(usage) {
@@ -77,6 +83,7 @@ async function handleSend(
       ctx.messages.push({ role: "assistant", content: accumulated });
       ctx.postMessage({ type: "assistantEnd", usage });
       ctx.setAbortController(undefined);
+      ctx.onAssistantFinish?.(text, accumulated, reasoningAccumulated);
     },
     onError(error) {
       settled = true;
