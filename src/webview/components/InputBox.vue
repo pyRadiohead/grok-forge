@@ -81,7 +81,7 @@ function onModelChange(e: Event) {
       @keydown="handleKeydown"
       :disabled="disabled || isGenerating"
       :placeholder="textareaPlaceholder"
-      rows="2"
+      rows="3"
     />
 
     <!-- Controls row -->
@@ -177,9 +177,9 @@ textarea {
   color: var(--vscode-input-foreground);
   border: 1px solid var(--vscode-input-border);
   border-radius: 4px;
-  padding: 8px;
+  padding: 14px;
   font-family: var(--vscode-font-family);
-  font-size: 12px;
+  font-size: 16px;
   resize: none;
   box-sizing: border-box;
 }
@@ -199,8 +199,8 @@ textarea:disabled { opacity: 0.6; }
   border: 1px solid var(--vscode-panel-border);
   color: var(--vscode-descriptionForeground);
   border-radius: 4px;
-  padding: 3px 9px;
-  font-size: 13px;
+  padding: 6px 14px;
+  font-size: 18px;
   font-weight: 700;
   cursor: pointer;
   line-height: 1;
@@ -213,8 +213,8 @@ textarea:disabled { opacity: 0.6; }
   color: var(--vscode-dropdown-foreground, #ccc);
   border: 1px solid var(--vscode-panel-border);
   border-radius: 4px;
-  padding: 3px 8px;
-  font-size: 11px;
+  padding: 6px 14px;
+  font-size: 14px;
   cursor: pointer;
   max-width: 170px;
 }
@@ -223,8 +223,8 @@ textarea:disabled { opacity: 0.6; }
 .send-btn, .stop-btn {
   border: none;
   border-radius: 4px;
-  padding: 4px 13px;
-  font-size: 13px;
+  padding: 8px 20px;
+  font-size: 18px;
   cursor: pointer;
   line-height: 1;
 }
