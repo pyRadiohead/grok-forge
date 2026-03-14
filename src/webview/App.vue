@@ -155,6 +155,7 @@ function onSaveSettings(payload: { models: Array<{ title: string; modelId: strin
 
 // Session handlers
 function onLoadSession(id: string) {
+  messages.value = [];
   vscode.postMessage({ type: "loadSession", sessionId: id });
   view.value = "chat";
 }
