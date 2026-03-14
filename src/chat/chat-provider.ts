@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { handleMessage, WebviewMessage } from "./message-handler";
 import { ChatMessage } from "../api/grok-client";
-import { ModelConfig, RequestConfig } from "../config";
+import { ModelConfig, RequestConfig, ChatSession, StoredMessage } from "../config";
 
 const FILE_GLOB = "**/*.{ts,tsx,js,jsx,vue,py,go,rs,java,cs,cpp,c,h,md,css,scss,html,sh}";
 const EXCLUDE_GLOB = "{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/.vscode/**,**/coverage/**,**/__pycache__/**,**/*.min.js,**/*.map,**/.env,**/.env.*,**/*.pem,**/*.key,**/*.p12,**/package-lock.json,**/yarn.lock,**/pnpm-lock.yaml}";
@@ -14,6 +14,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private models: ModelConfig[] = [];
   private cachedCodebase: string | null = null;
   private abortController?: AbortController;
+  private sessions: ChatSession[] = [];
+  private activeSessionId: string | undefined = undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -36,15 +38,51 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.context.subscriptions
     );
 
+    // Load sessions from workspaceState
+    this.sessions = this.context.workspaceState.get<ChatSession[]>("grokforge.sessions") ?? [];
+    this.activeSessionId = this.context.workspaceState.get<string>("grokforge.activeSessionId");
+
+    // Restore active session messages if applicable
+    if (this.activeSessionId) {
+      const active = this.sessions.find(s => s.id === this.activeSessionId);
+      if (active) {
+        // ChatMessage only has { role, content } — reasoning is not stored there.
+        // Reasoning is available in session.messages (StoredMessage[]) and will be
+        // sent to the webview via sessionLoaded when a session is explicitly loaded.
+        this.messages = active.messages.map(m => ({ role: m.role, content: m.content }));
+      } else {
+        this.activeSessionId = undefined;
+      }
+    }
+
     this.loadAndSendModels();
   }
 
   newChat() {
-    this.messages = [];
-    this.cachedCodebase = null;
+    // 1. Abort any active controller first
     this.abortController?.abort();
     this.abortController = undefined;
+
+    // 2. Remove ghost session (created but has zero stored messages)
+    if (this.activeSessionId) {
+      const idx = this.sessions.findIndex(s => s.id === this.activeSessionId);
+      if (idx !== -1 && this.sessions[idx].messages.length === 0) {
+        this.sessions.splice(idx, 1);
+        this.context.workspaceState.update("grokforge.sessions", this.sessions);
+      }
+    }
+
+    // 3. Clear active session
+    this.activeSessionId = undefined;
+    this.context.workspaceState.update("grokforge.activeSessionId", undefined);
+
+    // 4. Clear runtime state
+    this.messages = [];
+    this.cachedCodebase = null;
+
+    // 5. Notify webview
     this.postMessage({ type: "clearChat" });
+    this.sendSessionsLoaded();
   }
 
   getRequestConfig(index: number): RequestConfig | null {
@@ -58,6 +96,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const timeoutHandle = setTimeout(() => {
       this.postMessage({ type: "modelsLoaded", models: [], chatHeight: storedHeight });
+      this.sendSessionsLoaded();
     }, 5000);
 
     try {
@@ -85,9 +124,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       clearTimeout(timeoutHandle);
       this.models = models;
       this.postMessage({ type: "modelsLoaded", models, chatHeight: storedHeight });
+      this.sendSessionsLoaded();
     } catch {
       clearTimeout(timeoutHandle);
       this.postMessage({ type: "modelsLoaded", models: [], chatHeight: storedHeight });
+      this.sendSessionsLoaded();
     }
   }
 
@@ -105,15 +146,51 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "saveChatHeight":
         await this.context.globalState.update("grokforge.chatHeight", msg.height);
         return;
-      default:
-        handleMessage(msg, {
+      case "loadSession":
+        await this.handleLoadSession(msg.sessionId);
+        return;
+      case "deleteSession":
+        await this.handleDeleteSession(msg.sessionId);
+        return;
+      case "renameSession":
+        await this.handleRenameSession(msg.sessionId, msg.title);
+        return;
+      default: {
+        // Create a new session on first message if no active session
+        if (msg.type === "sendMessage" && !this.activeSessionId) {
+          const rawText: string = (msg as { type: "sendMessage"; text: string }).text;
+          const title = rawText.length > 40 ? rawText.slice(0, 40) + "…" : rawText;
+          const newSession: ChatSession = {
+            id: Date.now().toString(),
+            title,
+            createdAt: Date.now(),
+            messages: [],
+          };
+          this.activeSessionId = newSession.id;
+          this.sessions.unshift(newSession);
+          if (this.sessions.length > 20) {
+            this.sessions.pop();
+          }
+          await this.context.workspaceState.update("grokforge.sessions", this.sessions);
+          await this.context.workspaceState.update("grokforge.activeSessionId", this.activeSessionId);
+          this.sendSessionsLoaded();
+        }
+
+        await handleMessage(msg, {
           messages: this.messages,
           abortController: this.abortController,
           postMessage: (m) => this.postMessage(m),
           setAbortController: (ac) => { this.abortController = ac; },
           getRequestConfig: (i) => this.getRequestConfig(i),
           getCachedCodebase: () => this.cachedCodebase,
+          onAssistantFinish: (userText, assistantContent, reasoning) => {
+            this.handleAssistantFinish(userText, assistantContent, reasoning);
+          },
         });
+
+        // Send fresh session list after every send (success, error, or abort)
+        this.sendSessionsLoaded();
+      }
     }
   }
 
@@ -160,6 +237,79 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // 4. Reload and send updated model list to webview
     await this.loadAndSendModels();
+  }
+
+  private handleAssistantFinish(userText: string, assistantContent: string, reasoning: string) {
+    if (!this.activeSessionId) return;
+    const session = this.sessions.find(s => s.id === this.activeSessionId);
+    if (!session) return;
+    session.messages.push({ role: "user", content: userText });
+    session.messages.push({
+      role: "assistant",
+      content: assistantContent,
+      reasoning: reasoning || undefined,
+    });
+    this.context.workspaceState.update("grokforge.sessions", this.sessions);
+  }
+
+  private async handleLoadSession(sessionId: string) {
+    // Abort any in-progress generation
+    this.abortController?.abort();
+    this.abortController = undefined;
+
+    const session = this.sessions.find(s => s.id === sessionId);
+    if (!session) return;
+
+    // ChatMessage only has { role, content } — do not include reasoning here.
+    this.messages = session.messages.map(m => ({
+      role: m.role,
+      content: m.content,
+    }));
+    this.activeSessionId = sessionId;
+    await this.context.workspaceState.update("grokforge.activeSessionId", sessionId);
+
+    this.postMessage({
+      type: "sessionLoaded",
+      messages: session.messages,
+      sessionId,
+    });
+  }
+
+  private async handleDeleteSession(sessionId: string) {
+    // Abort if deleting the active session
+    if (sessionId === this.activeSessionId && this.abortController) {
+      this.abortController.abort();
+      this.abortController = undefined;
+    }
+
+    this.sessions = this.sessions.filter(s => s.id !== sessionId);
+    await this.context.workspaceState.update("grokforge.sessions", this.sessions);
+
+    if (sessionId === this.activeSessionId) {
+      this.activeSessionId = undefined;
+      await this.context.workspaceState.update("grokforge.activeSessionId", undefined);
+      this.messages = [];
+      this.cachedCodebase = null;
+      this.postMessage({ type: "clearChat" });
+    }
+
+    this.sendSessionsLoaded();
+  }
+
+  private async handleRenameSession(sessionId: string, title: string) {
+    const session = this.sessions.find(s => s.id === sessionId);
+    if (!session) return;
+    session.title = title;
+    await this.context.workspaceState.update("grokforge.sessions", this.sessions);
+    this.sendSessionsLoaded();
+  }
+
+  private sendSessionsLoaded() {
+    this.postMessage({
+      type: "sessionsLoaded",
+      sessions: this.sessions,
+      activeSessionId: this.activeSessionId ?? null,
+    });
   }
 
   private async readWorkspaceFiles(): Promise<{ text: string; fileCount: number; workspaceName: string }> {
