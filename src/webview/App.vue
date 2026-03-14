@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 import ChatMessage from "./components/ChatMessage.vue";
 import InputBox from "./components/InputBox.vue";
+import SettingsView from "./components/SettingsView.vue";
+
+interface ModelConfig {
+  title: string;
+  modelId: string;
+  apiKey: string;
+  unconfigured?: boolean;
+}
 
 interface Message {
   role: "user" | "assistant";
@@ -16,18 +24,82 @@ interface Usage {
 }
 
 const vscode = acquireVsCodeApi();
+
+// View state
+const view = ref<"chat" | "settings">("chat");
+const modelsReady = ref(false);
+const models = ref<ModelConfig[]>([]);
+const selectedModelIndex = ref<number | null>(null);
+
+// Chat state
 const messages = ref<Message[]>([]);
 const isGenerating = ref(false);
-const isLoadingFiles = ref(false);
 const error = ref<string | null>(null);
 const lastUsage = ref<Usage | null>(null);
-const totalUsage = ref<Usage>({ promptTokens: 0, completionTokens: 0 });
-const hasApiKey = ref<boolean | null>(null); // null = not yet known
-const lastCodebaseFileCount = ref(0);
-const chatContainer = ref<HTMLElement | null>(null);
+const sessionTotal = ref<Usage>({ promptTokens: 0, completionTokens: 0 });
 
-const multiAgent = ref(false);
-const tools = ref<string[]>([]);
+// Codebase state (owned by App, reflected in InputBox via props)
+const withCodebase = ref(false);
+const codebaseFileCount = ref(0);
+const codebaseWorkspaceName = ref("");
+const codebaseError = ref<string | null>(null);
+
+// Drag handle
+const chatContainer = ref<HTMLElement | null>(null);
+const panelContainer = ref<HTMLElement | null>(null);
+const chatHeightPx = ref(0);
+const isDragging = ref(false);
+let dragStartY = 0;
+let dragStartHeight = 0;
+let resizeObserver: ResizeObserver | null = null;
+
+// Derived
+const hasModels = computed(() => modelsReady.value && models.value.length > 0);
+
+const showDragHandle = computed(() => {
+  const panel = panelContainer.value;
+  if (!panel) return false;
+  return hasModels.value && panel.offsetHeight >= 260;
+});
+
+function clampHeight(h: number): number {
+  const panel = panelContainer.value;
+  if (!panel) return h;
+  const min = 120;
+  const max = panel.offsetHeight - 140;
+  if (max < min) return h; // panel too small — don't clamp
+  return Math.min(max, Math.max(min, h));
+}
+
+function applyHeight(h: number) {
+  const clamped = clampHeight(h);
+  chatHeightPx.value = clamped;
+  return clamped;
+}
+
+// Drag handle logic
+function onDragStart(e: MouseEvent) {
+  isDragging.value = true;
+  dragStartY = e.clientY;
+  dragStartHeight = chatHeightPx.value;
+  document.addEventListener("mousemove", onDragMove);
+  document.addEventListener("mouseup", onDragEnd);
+  e.preventDefault();
+}
+
+function onDragMove(e: MouseEvent) {
+  if (!isDragging.value) return;
+  const delta = e.clientY - dragStartY;
+  applyHeight(dragStartHeight + delta);
+}
+
+function onDragEnd() {
+  isDragging.value = false;
+  document.removeEventListener("mousemove", onDragMove);
+  document.removeEventListener("mouseup", onDragEnd);
+  // Persist final height
+  vscode.postMessage({ type: "saveChatHeight", height: chatHeightPx.value });
+}
 
 function scrollToBottom() {
   nextTick(() => {
@@ -37,149 +109,251 @@ function scrollToBottom() {
   });
 }
 
-function sendMessage(text: string, withCodebase: boolean) {
+// Header actions
+function onNewChat() {
+  vscode.postMessage({ type: "newChat" });
+}
+
+// Input zone handlers
+function onSend(payload: { text: string; withCodebase: boolean }) {
   error.value = null;
-  vscode.postMessage({ type: "sendMessage", text, withCodebase });
+  codebaseError.value = null;
+  vscode.postMessage({
+    type: "sendMessage",
+    text: payload.text,
+    withCodebase: payload.withCodebase,
+    selectedModelIndex: selectedModelIndex.value ?? 0,
+  });
 }
 
-function stopGeneration() {
-  vscode.postMessage({ type: "stopGeneration" });
+function onAttachCodebase() {
+  codebaseError.value = null;
+  vscode.postMessage({ type: "readCodebase" });
 }
 
-function toggleMultiAgent() {
-  multiAgent.value = !multiAgent.value;
-  vscode.postMessage({ type: "updateConfig", config: { multiAgent: multiAgent.value } });
+function onDetachCodebase() {
+  withCodebase.value = false;
+  codebaseFileCount.value = 0;
+  codebaseWorkspaceName.value = "";
 }
 
-function toggleTool(tool: string) {
-  const idx = tools.value.indexOf(tool);
-  if (idx >= 0) tools.value.splice(idx, 1);
-  else tools.value.push(tool);
-  vscode.postMessage({ type: "updateConfig", config: { tools: [...tools.value] } });
+function onModelChange(index: number) {
+  selectedModelIndex.value = index;
+}
+
+// Settings handlers
+function onSaveSettings(payload: { models: Array<{ title: string; modelId: string; apiKey: string }> }) {
+  vscode.postMessage({ type: "saveSettings", models: payload.models });
+  view.value = "chat";
+}
+
+// Message handler from extension host
+function handleExtensionMessage(event: MessageEvent) {
+  const msg = event.data;
+  switch (msg.type) {
+    case "modelsLoaded": {
+      models.value = msg.models ?? [];
+      modelsReady.value = true;
+      selectedModelIndex.value = models.value.length > 0 ? 0 : null;
+      // Apply persisted chat height
+      if (msg.chatHeight !== undefined) {
+        nextTick(() => {
+          const clamped = applyHeight(msg.chatHeight);
+          if (clamped !== msg.chatHeight) {
+            vscode.postMessage({ type: "saveChatHeight", height: clamped });
+          }
+        });
+      } else {
+        nextTick(() => {
+          const panel = panelContainer.value;
+          if (panel) applyHeight(Math.floor(panel.offsetHeight * 0.6));
+        });
+      }
+      break;
+    }
+    case "codebaseReady":
+      withCodebase.value = true;
+      codebaseFileCount.value = msg.fileCount;
+      codebaseWorkspaceName.value = msg.workspaceName;
+      break;
+    case "codebaseError":
+      codebaseError.value = msg.message;
+      break;
+    case "userMessage":
+      messages.value.push({ role: "user", content: msg.text });
+      scrollToBottom();
+      break;
+    case "assistantStart":
+      isGenerating.value = true;
+      messages.value.push({ role: "assistant", content: "", reasoning: "", isStreaming: true });
+      scrollToBottom();
+      break;
+    case "assistantDelta": {
+      const last = messages.value[messages.value.length - 1];
+      if (last?.role === "assistant") last.content += msg.delta;
+      scrollToBottom();
+      break;
+    }
+    case "reasoningDelta": {
+      const last = messages.value[messages.value.length - 1];
+      if (last?.role === "assistant") last.reasoning = (last.reasoning || "") + msg.delta;
+      scrollToBottom();
+      break;
+    }
+    case "assistantEnd": {
+      const last = messages.value[messages.value.length - 1];
+      if (last) last.isStreaming = false;
+      isGenerating.value = false;
+      if (msg.usage) {
+        lastUsage.value = msg.usage;
+        sessionTotal.value.promptTokens += msg.usage.promptTokens;
+        sessionTotal.value.completionTokens += msg.usage.completionTokens;
+      }
+      break;
+    }
+    case "error":
+      error.value = msg.message;
+      isGenerating.value = false;
+      break;
+    case "clearChat":
+      messages.value = [];
+      error.value = null;
+      lastUsage.value = null;
+      sessionTotal.value = { promptTokens: 0, completionTokens: 0 };
+      withCodebase.value = false;
+      codebaseFileCount.value = 0;
+      codebaseError.value = null;
+      break;
+  }
 }
 
 onMounted(() => {
-  window.addEventListener("message", (event) => {
-    const msg = event.data;
-    switch (msg.type) {
-      case "apiKeyStatus":
-        hasApiKey.value = msg.hasKey;
-        break;
-      case "loadingFiles":
-        isLoadingFiles.value = true;
-        break;
-      case "filesLoaded":
-        isLoadingFiles.value = false;
-        lastCodebaseFileCount.value = msg.fileCount;
-        break;
-      case "userMessage":
-        messages.value.push({ role: "user", content: msg.text });
-        scrollToBottom();
-        break;
-      case "assistantStart":
-        isGenerating.value = true;
-        messages.value.push({ role: "assistant", content: "", reasoning: "", isStreaming: true });
-        scrollToBottom();
-        break;
-      case "assistantDelta": {
-        const last = messages.value[messages.value.length - 1];
-        if (last?.role === "assistant") last.content += msg.delta;
-        scrollToBottom();
-        break;
+  window.addEventListener("message", handleExtensionMessage);
+
+  // Set up ResizeObserver to re-clamp on panel resize
+  if (panelContainer.value) {
+    resizeObserver = new ResizeObserver(() => {
+      if (chatHeightPx.value > 0) {
+        const clamped = applyHeight(chatHeightPx.value);
+        vscode.postMessage({ type: "saveChatHeight", height: clamped });
       }
-      case "reasoningDelta": {
-        const last = messages.value[messages.value.length - 1];
-        if (last?.role === "assistant") last.reasoning = (last.reasoning || "") + msg.delta;
-        scrollToBottom();
-        break;
-      }
-      case "assistantEnd": {
-        const last = messages.value[messages.value.length - 1];
-        if (last) last.isStreaming = false;
-        isGenerating.value = false;
-        if (msg.usage) {
-          lastUsage.value = msg.usage;
-          totalUsage.value.promptTokens += msg.usage.promptTokens;
-          totalUsage.value.completionTokens += msg.usage.completionTokens;
-        }
-        break;
-      }
-      case "error":
-        error.value = msg.message;
-        isGenerating.value = false;
-        break;
-      case "clearChat":
-        messages.value = [];
-        error.value = null;
-        lastUsage.value = null;
-        totalUsage.value = { promptTokens: 0, completionTokens: 0 };
-        lastCodebaseFileCount.value = 0;
-        break;
-    }
-  });
+    });
+    resizeObserver.observe(panelContainer.value);
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("message", handleExtensionMessage);
+  resizeObserver?.disconnect();
+  document.removeEventListener("mousemove", onDragMove);
+  document.removeEventListener("mouseup", onDragEnd);
 });
 </script>
 
 <template>
-  <div class="app">
-    <!-- API key not set -->
-    <div v-if="hasApiKey === false" class="no-key">
-      <p>No xAI API key set.</p>
-      <p>Open the Command Palette and run:<br><code>GrokForge: Set xAI API Key</code></p>
-    </div>
+  <div class="app" ref="panelContainer">
 
-    <template v-else>
-      <div class="toolbar">
-        <button
-          :class="['tool-btn', { active: multiAgent }]"
-          @click="toggleMultiAgent"
-          title="Toggle multi-agent mode"
-        >
-          Multi-Agent
-        </button>
-        <button
-          v-for="tool in ['web_search', 'x_search', 'code_execution']"
-          :key="tool"
-          :class="['tool-btn', 'small', { active: tools.includes(tool) }]"
-          @click="toggleTool(tool)"
-          :title="`Toggle ${tool}`"
-        >
-          {{ tool === 'web_search' ? 'Web' : tool === 'x_search' ? 'X' : 'Code' }}
-        </button>
+    <!-- Header: always visible, two states -->
+    <header class="header">
+      <span class="header-title">GrokForge</span>
+      <div class="header-actions">
+        <template v-if="view === 'chat'">
+          <button class="header-btn" @click="onNewChat">+ New Chat</button>
+          <button
+            class="header-btn"
+            :class="{ highlighted: modelsReady && !hasModels }"
+            @click="view = 'settings'"
+          >⚙ Settings</button>
+        </template>
+        <template v-else>
+          <button class="header-btn" @click="view = 'chat'">← Back</button>
+        </template>
+      </div>
+    </header>
+
+    <!-- Chat view -->
+    <template v-if="view === 'chat'">
+
+      <!-- Loading skeleton -->
+      <div v-if="!modelsReady" class="skeleton">
+        <div class="skeleton-line" />
+        <div class="skeleton-line short" />
       </div>
 
-      <div ref="chatContainer" class="chat-container">
-        <div v-if="messages.length === 0" class="empty-state">
-          Send a message to start chatting with Grok.
+      <template v-else>
+        <!-- Chat container (resizable) -->
+        <div
+          ref="chatContainer"
+          class="chat-container"
+          :style="hasModels ? { height: chatHeightPx + 'px' } : { flex: '1' }"
+        >
+          <!-- No-models message -->
+          <div v-if="!hasModels" class="no-models">
+            No models configured — add one in ⚙ Settings.
+          </div>
+
+          <!-- Message list -->
+          <template v-else>
+            <div v-if="messages.length === 0" class="empty-state">
+              Send a message to start chatting with Grok.
+            </div>
+            <ChatMessage
+              v-for="(msg, i) in messages"
+              :key="i"
+              :message="msg"
+            />
+            <div v-if="error" class="error">{{ error }}</div>
+          </template>
         </div>
-        <ChatMessage
-          v-for="(msg, i) in messages"
-          :key="i"
-          :message="msg"
+
+        <!-- Drag handle: only when models exist and panel is tall enough -->
+        <div
+          v-if="showDragHandle"
+          class="drag-handle"
+          @mousedown="onDragStart"
+          title="Drag to resize"
+        >
+          <span class="drag-dots">• • •</span>
+        </div>
+
+        <!-- Token usage bar: only when models exist -->
+        <div v-if="hasModels" class="token-bar">
+          <template v-if="lastUsage">
+            ↑{{ lastUsage.promptTokens.toLocaleString() }}
+            ↓{{ lastUsage.completionTokens.toLocaleString() }} tokens
+            <span class="token-total">
+              (total: {{ (sessionTotal.promptTokens + sessionTotal.completionTokens).toLocaleString() }})
+            </span>
+          </template>
+        </div>
+
+        <!-- Input zone -->
+        <InputBox
+          :models="models"
+          :selected-model-index="selectedModelIndex"
+          :with-codebase="withCodebase"
+          :file-count="codebaseFileCount"
+          :workspace-name="codebaseWorkspaceName"
+          :codebase-error="codebaseError"
+          :disabled="!hasModels"
+          :is-generating="isGenerating"
+          @send="onSend"
+          @stop="() => vscode.postMessage({ type: 'stopGeneration' })"
+          @attach-codebase="onAttachCodebase"
+          @detach-codebase="onDetachCodebase"
+          @model-change="onModelChange"
         />
-        <div v-if="isLoadingFiles" class="info">Reading workspace files…</div>
-        <div v-if="error" class="error">{{ error }}</div>
-      </div>
-
-      <div class="status-bar">
-        <span v-if="lastCodebaseFileCount > 0" class="context-badge">
-          📁 {{ lastCodebaseFileCount }} files
-        </span>
-        <span class="spacer" />
-        <span v-if="lastUsage" class="usage" :title="`Session total: ${totalUsage.promptTokens.toLocaleString()} in / ${totalUsage.completionTokens.toLocaleString()} out`">
-          ↑{{ lastUsage.promptTokens.toLocaleString() }} ↓{{ lastUsage.completionTokens.toLocaleString() }} tokens
-          <span class="usage-total"> (total: {{ (totalUsage.promptTokens + totalUsage.completionTokens).toLocaleString() }})</span>
-        </span>
-      </div>
-
-      <InputBox
-        :disabled="isGenerating"
-        :is-generating="isGenerating"
-        :is-loading-files="isLoadingFiles"
-        @send="sendMessage"
-        @stop="stopGeneration"
-      />
+      </template>
     </template>
+
+    <!-- Settings view -->
+    <SettingsView
+      v-else
+      :models="models"
+      @save-settings="onSaveSettings"
+      @back="view = 'chat'"
+    />
+
   </div>
 </template>
 
@@ -192,73 +366,116 @@ body {
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
 }
+</style>
 
+<style scoped>
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow: hidden;
 }
 
-.no-key {
-  flex: 1;
+/* Header */
+.header {
+  background: #000;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 20px;
-  text-align: center;
-  color: var(--vscode-descriptionForeground);
-  font-size: 13px;
+  justify-content: space-between;
+  padding: 10px 14px;
+  flex-shrink: 0;
 }
-
-.no-key code {
-  font-family: var(--vscode-editor-font-family);
-  background: var(--vscode-textCodeBlock-background);
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-size: 12px;
+.header-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
 }
-
-.toolbar {
+.header-actions {
   display: flex;
-  gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--vscode-panel-border);
-  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
 }
-
-.tool-btn {
-  background: var(--vscode-button-secondaryBackground);
-  color: var(--vscode-button-secondaryForeground);
-  border: 1px solid transparent;
-  border-radius: 3px;
-  padding: 2px 8px;
-  font-size: 11px;
+.header-btn {
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 13px;
   cursor: pointer;
+  padding: 0;
 }
-.tool-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
-.tool-btn.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-.tool-btn.small { padding: 2px 6px; font-size: 10px; }
+.header-btn:hover { color: #fff; }
+.header-btn.highlighted { color: var(--vscode-button-background, #0078d4); }
 
+/* Chat container */
 .chat-container {
-  flex: 1;
   overflow-y: auto;
   padding: 8px;
+  flex-shrink: 0;
+}
+
+/* Drag handle */
+.drag-handle {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+  cursor: ns-resize;
+  flex-shrink: 0;
+  user-select: none;
+}
+.drag-dots {
+  color: #444;
+  font-size: 9px;
+  letter-spacing: 3px;
+}
+
+/* Token bar */
+.token-bar {
+  padding: 2px 12px;
+  display: flex;
+  justify-content: flex-end;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  flex-shrink: 0;
+}
+.token-total { opacity: 0.7; }
+
+/* States */
+.skeleton {
+  flex: 1;
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skeleton-line {
+  height: 12px;
+  background: var(--vscode-input-background);
+  border-radius: 4px;
+  opacity: 0.4;
+  animation: shimmer 1.2s infinite;
+}
+.skeleton-line.short { width: 60%; }
+
+@keyframes shimmer {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
+.no-models {
+  color: var(--vscode-descriptionForeground);
+  font-size: 13px;
+  text-align: center;
+  padding: 30px 20px;
+  line-height: 1.5;
 }
 
 .empty-state {
   color: var(--vscode-descriptionForeground);
   text-align: center;
-  margin-top: 40px;
+  margin-top: 30px;
   font-size: 13px;
-}
-
-.info {
-  color: var(--vscode-descriptionForeground);
-  font-size: 11px;
-  font-style: italic;
-  padding: 4px 0;
 }
 
 .error {
@@ -269,30 +486,5 @@ body {
   border-radius: 4px;
   margin: 6px 0;
   font-size: 12px;
-}
-
-.status-bar {
-  display: flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-top: 1px solid var(--vscode-panel-border);
-  min-height: 20px;
-}
-
-.context-badge {
-  font-size: 10px;
-  color: var(--vscode-charts-blue);
-}
-
-.spacer { flex: 1; }
-
-.usage {
-  font-size: 10px;
-  color: var(--vscode-descriptionForeground);
-  cursor: default;
-}
-
-.usage-total {
-  opacity: 0.7;
 }
 </style>
