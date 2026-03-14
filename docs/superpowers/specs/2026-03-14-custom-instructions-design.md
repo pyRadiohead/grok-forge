@@ -1,0 +1,192 @@
+# Custom Instructions Design
+
+## Goal
+
+Add a layered system prompt mechanism to GrokForge that shapes model personality and response style, and maximises multi-agent model capabilities through explicit orchestration guidance.
+
+## Architecture
+
+Two-layer system: a global baseline instruction set that applies to every conversation across all models, plus an optional per-model override that appends to the global baseline. At send time the extension assembles the effective system prompt and injects it as a `{ role: "system" }` message at the head of the `input` array. If both layers are empty, no system message is sent.
+
+## Data Model
+
+### Storage
+
+```ts
+// globalState — new key
+"grokforge.globalInstructions": string   // default ""
+
+// globalState — existing "grokforge.models" entry gains one field
+interface ModelMeta {
+  title: string;
+  modelId: string;
+  instructions?: string;   // per-model override, default ""
+}
+```
+
+### RequestConfig (src/config.ts)
+
+```ts
+export interface RequestConfig {
+  modelId: string;
+  apiKey: string;
+  store: false;
+  tools?: string[];
+  systemPrompt?: string;   // assembled: global + model-specific
+}
+```
+
+### Assembly (chat-provider.ts — getRequestConfig)
+
+```ts
+function buildSystemPrompt(global: string, modelSpecific: string): string | null {
+  const parts = [global, modelSpecific].map(s => s.trim()).filter(Boolean);
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+```
+
+### API injection (grok-client.ts)
+
+```ts
+const input = config.systemPrompt
+  ? [{ role: "system", content: config.systemPrompt }, ...messages]
+  : messages;
+```
+
+The xAI Responses API accepts `role: "system"` as the first input item (OpenAI-compatible format).
+
+## Settings UI
+
+### Global instructions section (top of Settings, above model list)
+
+```
+┌─ Custom Instructions (Global) ──────────────────────────┐
+│ Load template: [dropdown ▼]                              │
+│ ┌──────────────────────────────────────────────────────┐ │
+│ │ Applied to every conversation across all models.     │ │
+│ │                                                      │ │
+│ │ [textarea, ~5 rows]                                  │ │
+│ └──────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Per-model instructions (expandable section inside each model row)
+
+```
+┌─ grok-4.20-multi-agent ──────────────────────────────────┐
+│ Title: [___]  Model ID: [___]  API Key: [***]            │
+│ ▼ Model-specific instructions                            │
+│ ┌──────────────────────────────────────────────────────┐ │
+│ │ Appended after global instructions.                  │ │
+│ │ Load template: [dropdown ▼]                          │ │
+│ │ [textarea, ~4 rows]                                  │ │
+│ └──────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+```
+
+Per-model section is collapsed by default; clicking the label toggles it.
+
+### saveSettings message (no new message types)
+
+The existing `saveSettings` webview message is extended:
+
+```ts
+{
+  type: "saveSettings";
+  globalInstructions: string;
+  models: Array<{ title: string; modelId: string; apiKey: string; instructions: string }>;
+}
+```
+
+## Template Library
+
+Six built-in templates, hardcoded in the extension. Selecting a template loads its text into the active textarea (replaces current content). Templates appear in both the global and per-model dropdowns.
+
+### 1. Coding assistant
+```
+You are a senior software engineer. Write clean, idiomatic, well-structured code.
+Before answering, think through the problem. If the request is ambiguous, ask one clarifying question before proceeding.
+Prefer editing existing patterns over introducing new abstractions. YAGNI.
+When reviewing code, cite specific lines and explain the why, not just the what.
+```
+
+### 2. Multi-agent deep researcher *(designed for grok-4.20-multi-agent)*
+```
+You are a multi-agent research system. For every non-trivial task:
+1. Decompose into independent subtasks that can be investigated in parallel.
+2. Assign each subtask to a focused sub-agent with a clear, narrow scope.
+3. Each sub-agent must use web_search or x_search to ground its findings in current sources.
+4. After sub-agents complete, synthesize results: identify agreements, conflicts, and gaps.
+5. Produce a final answer with source attribution per claim.
+
+For simple factual questions, respond directly without decomposition.
+Always show your reasoning and which sub-agent contributed each key finding.
+```
+
+### 3. Deep researcher *(single model, reasoning variant)*
+```
+You are a thorough research assistant. Use web_search to verify facts before asserting them.
+Cite sources inline. When sources conflict, present both perspectives and explain the discrepancy.
+Structure your responses: summary first, then detailed findings, then caveats.
+```
+
+### 4. Code reviewer
+```
+You are an expert code reviewer. For every review:
+- Security: flag injection risks, secret exposure, unvalidated input.
+- Correctness: identify logic errors, edge cases, off-by-one issues.
+- Performance: note O(n²) patterns, unnecessary allocations, blocking I/O.
+- Maintainability: flag unclear naming, missing error handling, violations of single responsibility.
+Be specific: reference line numbers and explain the risk, not just the symptom.
+```
+
+### 5. Concise assistant
+```
+Be direct and concise. No preamble, no summaries of what you just said.
+Lead with the answer, then add context only if essential.
+Use bullet points for lists. Skip pleasantries.
+```
+
+### 6. Multi-agent investigator
+```
+You are a multi-agent investigator. When given a complex problem:
+1. Identify 3–5 distinct angles to investigate (technical, contextual, historical, contrarian, practical).
+2. Assign one sub-agent per angle. Each must independently research its angle using web_search.
+3. Sub-agents must not assume — every claim needs a source or "unverified".
+4. Synthesize: produce a structured brief with sections per angle, then a unified conclusion.
+5. Flag the top 1–2 unresolved questions that would most change the conclusion.
+```
+
+## Files Changed
+
+| File | Change |
+|---|---|
+| `src/config.ts` | Add `systemPrompt?: string` to `RequestConfig` |
+| `src/chat/chat-provider.ts` | Load `globalInstructions` from globalState; pass to `getRequestConfig`; handle new `saveSettings` shape |
+| `src/chat/message-handler.ts` | Update `saveSettings` WebviewMessage type |
+| `src/api/grok-client.ts` | Prepend system message when `config.systemPrompt` is set |
+| `src/webview/components/SettingsView.vue` | Global instructions section + per-model expandable section + template dropdown |
+| `src/webview/App.vue` | Pass `globalInstructions` in `saveSettings` postMessage |
+
+New file: `src/webview/prompts.ts` — exports the `TEMPLATES` array (name + content pairs). Imported by `SettingsView.vue` only.
+
+## Vertex AI Upgrade Path
+
+This design is intentionally structured so the local implementation is a thin shell around the `RequestConfig` interface. Upgrading to Vertex AI means:
+
+1. Replace `createGrokClient` with `createVertexClient` that POSTs to a Vertex AI endpoint.
+2. `systemPrompt` on `RequestConfig` becomes a Vertex Prompt Management template ID (or the assembled string is sent as a grounding instruction to the Vertex agent).
+3. The settings UI gains a "Vertex AI" provider toggle; no other UI changes needed.
+
+What Vertex AI Agent Builder would add that local cannot:
+
+| Capability | Local (this spec) | Vertex AI (future) |
+|---|---|---|
+| System prompt | Static text, per-user | Managed, versioned, team-shared in Vertex Prompt Management |
+| Tool use | web_search, x_search, code_execution (xAI server-side) | Vertex Extensions + custom tools (internal APIs, GCS, BigQuery) |
+| Search grounding | xAI web_search | Google Search grounding (fresher, higher-quality citations) |
+| Agent memory | None (conversation history only) | Vertex Agent Engine — persistent memory across sessions |
+| Orchestration | Model handles sub-agents internally | Vertex Reasoning Engine — Python-defined multi-agent graphs |
+| Model choice | xAI Grok only | Grok via Model Garden + Gemini, Claude, Llama in same interface |
+
+The extension's streaming display, session history, and VS Code integration are all unchanged in the Vertex path.
