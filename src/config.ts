@@ -9,6 +9,7 @@ export interface RequestConfig {
   modelId: string;
   apiKey: string;
   store: false; // instructs xAI not to store conversation server-side; always false
+  tools?: string[]; // server-side tool names: web_search, x_search, code_execution
 }
 
 export interface StoredMessage {

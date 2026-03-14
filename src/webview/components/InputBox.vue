@@ -15,6 +15,7 @@ const props = defineProps<{
   codebaseError: string | null;
   disabled: boolean;      // true when no models at all
   isGenerating: boolean;
+  toolsEnabled: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   attachCodebase: [];
   detachCodebase: [];
   modelChange: [index: number];
+  toggleTools: [];
 }>();
 
 const text = ref("");
@@ -87,14 +89,21 @@ function onModelChange(e: Event) {
     <!-- Controls row -->
     <div class="controls">
       <!-- Left: @ button -->
-      <!-- Disabled only when no models (disabled prop) or codebase already attached (use × to detach).
-           NOT disabled during generation — spec says no-op when chip shown, not disabled during streaming. -->
       <button
         class="at-btn"
         :disabled="disabled || withCodebase"
         @click="$emit('attachCodebase')"
         title="Attach codebase as context"
       >@</button>
+
+      <!-- Tools toggle button -->
+      <button
+        class="tools-btn"
+        :class="{ active: toolsEnabled }"
+        :disabled="disabled"
+        @click="$emit('toggleTools')"
+        title="Toggle web search + code execution tools"
+      >🔍</button>
 
       <span class="spacer" />
 
@@ -194,19 +203,28 @@ textarea:disabled { opacity: 0.6; }
 
 .spacer { flex: 1; }
 
-.at-btn {
+.at-btn, .tools-btn {
   background: none;
   border: 1px solid var(--vscode-panel-border);
   color: var(--vscode-descriptionForeground);
   border-radius: 4px;
-  padding: 6px 14px;
-  font-size: 18px;
-  font-weight: 700;
+  padding: 6px 10px;
+  font-size: 14px;
   cursor: pointer;
   line-height: 1;
 }
-.at-btn:hover:not(:disabled) { color: var(--vscode-foreground); }
-.at-btn:disabled { opacity: 0.4; cursor: default; }
+.at-btn {
+  font-size: 18px;
+  font-weight: 700;
+  padding: 6px 14px;
+}
+.at-btn:hover:not(:disabled), .tools-btn:hover:not(:disabled) { color: var(--vscode-foreground); }
+.at-btn:disabled, .tools-btn:disabled { opacity: 0.4; cursor: default; }
+.tools-btn.active {
+  color: #4ec994;
+  border-color: #2d5a2d;
+  background: #1a3a1a;
+}
 
 .model-select {
   background: var(--vscode-dropdown-background, #252526);

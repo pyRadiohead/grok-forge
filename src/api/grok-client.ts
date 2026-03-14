@@ -8,6 +8,7 @@ export interface ChatMessage {
 export interface StreamCallbacks {
   onText: (delta: string) => void;
   onReasoning: (delta: string) => void;
+  onToolCall: (toolName: string, status: "in_progress" | "completed") => void;
   onFinish: (usage?: { promptTokens: number; completionTokens: number }) => void;
   onError: (error: Error) => void;
 }
@@ -27,6 +28,11 @@ export function createGrokClient(apiKey: string) {
       stream: true,
       store: config.store,
     };
+
+    // Server-side tools (web_search, x_search, code_execution)
+    if (config.tools && config.tools.length > 0) {
+      body.tools = config.tools.map((t) => ({ type: t }));
+    }
 
     let response: Response;
     try {
@@ -106,11 +112,19 @@ export function createGrokClient(apiKey: string) {
   return { chat };
 }
 
+// Known tool call event prefixes
+const TOOL_PREFIXES: Record<string, string> = {
+  "response.web_search_call.": "web_search",
+  "response.x_search_call.": "x_search",
+  "response.code_interpreter_call.": "code_execution",
+};
+
 function processEvent(
   event: Record<string, unknown>,
   callbacks: StreamCallbacks
 ) {
   const type = event.type as string | undefined;
+  if (!type) return;
 
   // xAI Responses API SSE event types
   if (type === "response.output_text.delta") {
@@ -123,6 +137,15 @@ function processEvent(
     const delta = (event as { delta?: string }).delta ?? "";
     if (delta) callbacks.onReasoning(delta);
     return;
+  }
+
+  // Tool call progress events
+  for (const [prefix, toolName] of Object.entries(TOOL_PREFIXES)) {
+    if (type.startsWith(prefix)) {
+      const status = type.endsWith(".in_progress") ? "in_progress" : "completed";
+      callbacks.onToolCall(toolName, status);
+      return;
+    }
   }
 
   // Fallback: OpenAI-compatible chat completions streaming format

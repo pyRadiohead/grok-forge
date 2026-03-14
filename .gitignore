@@ -20,3 +20,6 @@ Thumbs.db
 
 # Git worktrees
 .worktrees/
+
+# Brainstorming / superpowers session files
+.superpowers/

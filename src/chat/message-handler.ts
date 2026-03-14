@@ -2,7 +2,7 @@ import { RequestConfig } from "../config";
 import { createGrokClient, ChatMessage } from "../api/grok-client";
 
 export type WebviewMessage =
-  | { type: "sendMessage"; text: string; withCodebase: boolean; selectedModelIndex: number }
+  | { type: "sendMessage"; text: string; withCodebase: boolean; selectedModelIndex: number; toolsEnabled: boolean }
   | { type: "stopGeneration" }
   | { type: "newChat" }
   | { type: "readCodebase" }
@@ -25,7 +25,7 @@ export interface HandlerContext {
 export async function handleMessage(msg: WebviewMessage, ctx: HandlerContext): Promise<void> {
   switch (msg.type) {
     case "sendMessage":
-      return handleSend(msg.text, msg.withCodebase, msg.selectedModelIndex, ctx);
+      return handleSend(msg.text, msg.withCodebase, msg.selectedModelIndex, msg.toolsEnabled, ctx);
     case "stopGeneration":
       ctx.abortController?.abort();
       ctx.setAbortController(undefined);
@@ -34,20 +34,27 @@ export async function handleMessage(msg: WebviewMessage, ctx: HandlerContext): P
   }
 }
 
+const SERVER_TOOLS = ["web_search", "x_search", "code_execution"];
+
 async function handleSend(
   text: string,
   withCodebase: boolean,
   selectedModelIndex: number,
+  toolsEnabled: boolean,
   ctx: HandlerContext
 ) {
-  const requestConfig = ctx.getRequestConfig(selectedModelIndex);
-  if (!requestConfig) {
+  const baseConfig = ctx.getRequestConfig(selectedModelIndex);
+  if (!baseConfig) {
     ctx.postMessage({
       type: "error",
       message: "Invalid model selection. Please reload the panel.",
     });
     return;
   }
+
+  const requestConfig: RequestConfig = toolsEnabled
+    ? { ...baseConfig, tools: SERVER_TOOLS }
+    : baseConfig;
 
   let messageContent = text;
   if (withCodebase) {
@@ -78,10 +85,13 @@ async function handleSend(
       reasoningAccumulated += delta;
       ctx.postMessage({ type: "reasoningDelta", delta });
     },
+    onToolCall(toolName, status) {
+      ctx.postMessage({ type: "toolCallUpdate", toolName, status });
+    },
     onFinish(usage) {
       settled = true;
       ctx.messages.push({ role: "assistant", content: accumulated });
-      ctx.postMessage({ type: "assistantEnd", usage });
+      ctx.postMessage({ type: "assistantEnd", usage, modelId: requestConfig.modelId });
       ctx.setAbortController(undefined);
       ctx.onAssistantFinish?.(text, accumulated, reasoningAccumulated);
     },

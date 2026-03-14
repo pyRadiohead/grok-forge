@@ -43,12 +43,16 @@ const isGenerating = ref(false);
 const error = ref<string | null>(null);
 const lastUsage = ref<Usage | null>(null);
 const sessionTotal = ref<Usage>({ promptTokens: 0, completionTokens: 0 });
+const lastModelId = ref<string | null>(null);
 
 // Codebase state (owned by App, reflected in InputBox via props)
 const withCodebase = ref(false);
 const codebaseFileCount = ref(0);
 const codebaseWorkspaceName = ref("");
 const codebaseError = ref<string | null>(null);
+
+// Tools state
+const toolsEnabled = ref(false);
 
 // Drag handle
 const chatContainer = ref<HTMLElement | null>(null);
@@ -103,7 +107,6 @@ function onDragEnd() {
   isDragging.value = false;
   document.removeEventListener("mousemove", onDragMove);
   document.removeEventListener("mouseup", onDragEnd);
-  // Persist final height
   vscode.postMessage({ type: "saveChatHeight", height: chatHeightPx.value });
 }
 
@@ -129,6 +132,7 @@ function onSend(payload: { text: string; withCodebase: boolean }) {
     text: payload.text,
     withCodebase: payload.withCodebase,
     selectedModelIndex: selectedModelIndex.value ?? 0,
+    toolsEnabled: toolsEnabled.value,
   });
 }
 
@@ -176,7 +180,6 @@ function handleExtensionMessage(event: MessageEvent) {
       models.value = msg.models ?? [];
       modelsReady.value = true;
       selectedModelIndex.value = models.value.length > 0 ? 0 : null;
-      // Apply persisted chat height
       if (msg.chatHeight !== undefined) {
         nextTick(() => {
           const clamped = applyHeight(msg.chatHeight);
@@ -221,10 +224,22 @@ function handleExtensionMessage(event: MessageEvent) {
       scrollToBottom();
       break;
     }
+    case "toolCallUpdate": {
+      // Show tool activity in the reasoning/thinking section of the current message
+      const last = messages.value[messages.value.length - 1];
+      if (last?.role === "assistant" && msg.status === "in_progress") {
+        const label = msg.toolName === "web_search" ? "🔍 Searching web…"
+          : msg.toolName === "x_search" ? "🔍 Searching X…"
+          : "⚙️ Running code…";
+        last.reasoning = (last.reasoning || "") + label + "\n";
+      }
+      break;
+    }
     case "assistantEnd": {
       const last = messages.value[messages.value.length - 1];
       if (last) last.isStreaming = false;
       isGenerating.value = false;
+      if (msg.modelId) lastModelId.value = msg.modelId;
       if (msg.usage) {
         lastUsage.value = msg.usage;
         sessionTotal.value.promptTokens += msg.usage.promptTokens;
@@ -240,6 +255,7 @@ function handleExtensionMessage(event: MessageEvent) {
       messages.value = [];
       error.value = null;
       lastUsage.value = null;
+      lastModelId.value = null;
       sessionTotal.value = { promptTokens: 0, completionTokens: 0 };
       withCodebase.value = false;
       codebaseFileCount.value = 0;
@@ -250,9 +266,9 @@ function handleExtensionMessage(event: MessageEvent) {
       activeSessionId.value = msg.activeSessionId ?? null;
       break;
     case "sessionLoaded": {
-      // Full UI state reset on session load
       error.value = null;
       lastUsage.value = null;
+      lastModelId.value = null;
       sessionTotal.value = { promptTokens: 0, completionTokens: 0 };
       isGenerating.value = false;
       withCodebase.value = false;
@@ -273,7 +289,6 @@ function handleExtensionMessage(event: MessageEvent) {
 onMounted(() => {
   window.addEventListener("message", handleExtensionMessage);
 
-  // Set up ResizeObserver to re-clamp on panel resize
   if (panelContainer.value) {
     resizeObserver = new ResizeObserver(() => {
       if (chatHeightPx.value > 0) {
@@ -296,7 +311,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="app" ref="panelContainer">
 
-    <!-- Header: always visible, three states -->
+    <!-- Header: always visible -->
     <header class="header">
       <span class="header-title">GrokForge</span>
       <div class="header-actions">
@@ -317,26 +332,20 @@ onBeforeUnmount(() => {
 
     <!-- Chat view -->
     <template v-if="view === 'chat'">
-
-      <!-- Loading skeleton -->
       <div v-if="!modelsReady" class="skeleton">
         <div class="skeleton-line" />
         <div class="skeleton-line short" />
       </div>
 
       <template v-else>
-        <!-- Chat container (resizable) -->
         <div
           ref="chatContainer"
           class="chat-container"
           :style="hasModels ? { height: chatHeightPx + 'px' } : { flex: '1' }"
         >
-          <!-- No-models message -->
           <div v-if="!hasModels" class="no-models">
             No models configured — add one in ⚙ Settings.
           </div>
-
-          <!-- Message list -->
           <template v-else>
             <div v-if="messages.length === 0" class="empty-state">
               Send a message to start chatting with Grok.
@@ -350,7 +359,6 @@ onBeforeUnmount(() => {
           </template>
         </div>
 
-        <!-- Drag handle: only when models exist and panel is tall enough -->
         <div
           v-if="showDragHandle"
           class="drag-handle"
@@ -360,9 +368,9 @@ onBeforeUnmount(() => {
           <span class="drag-dots">• • •</span>
         </div>
 
-        <!-- Token usage bar: only when models exist -->
         <div v-if="hasModels" class="token-bar">
           <template v-if="lastUsage">
+            <span v-if="lastModelId" class="token-model">{{ lastModelId }}</span>
             ↑{{ lastUsage.promptTokens.toLocaleString() }}
             ↓{{ lastUsage.completionTokens.toLocaleString() }} tokens
             <span class="token-total">
@@ -370,23 +378,6 @@ onBeforeUnmount(() => {
             </span>
           </template>
         </div>
-
-        <!-- Input zone -->
-        <InputBox
-          :models="models"
-          :selected-model-index="selectedModelIndex"
-          :with-codebase="withCodebase"
-          :file-count="codebaseFileCount"
-          :workspace-name="codebaseWorkspaceName"
-          :codebase-error="codebaseError"
-          :disabled="!hasModels"
-          :is-generating="isGenerating"
-          @send="onSend"
-          @stop="() => vscode.postMessage({ type: 'stopGeneration' })"
-          @attach-codebase="onAttachCodebase"
-          @detach-codebase="onDetachCodebase"
-          @model-change="onModelChange"
-        />
       </template>
     </template>
 
@@ -407,6 +398,27 @@ onBeforeUnmount(() => {
       @delete-session="onDeleteSession"
       @rename-session="onRenameSession"
       @back="view = 'chat'"
+    />
+
+    <!-- InputBox: always mounted when models are ready so textarea text survives view switches -->
+    <InputBox
+      v-if="modelsReady"
+      v-show="view === 'chat'"
+      :models="models"
+      :selected-model-index="selectedModelIndex"
+      :with-codebase="withCodebase"
+      :file-count="codebaseFileCount"
+      :workspace-name="codebaseWorkspaceName"
+      :codebase-error="codebaseError"
+      :disabled="!hasModels"
+      :is-generating="isGenerating"
+      :tools-enabled="toolsEnabled"
+      @send="onSend"
+      @stop="() => vscode.postMessage({ type: 'stopGeneration' })"
+      @attach-codebase="onAttachCodebase"
+      @detach-codebase="onDetachCodebase"
+      @model-change="onModelChange"
+      @toggle-tools="toolsEnabled = !toolsEnabled"
     />
 
   </div>
@@ -431,7 +443,6 @@ body {
   overflow: hidden;
 }
 
-/* Header */
 .header {
   background: #000;
   display: flex;
@@ -461,14 +472,12 @@ body {
 .header-btn:hover { color: #fff; }
 .header-btn.highlighted { color: var(--vscode-button-background, #0078d4); }
 
-/* Chat container */
 .chat-container {
   overflow-y: auto;
   padding: 8px;
   flex-shrink: 0;
 }
 
-/* Drag handle */
 .drag-handle {
   display: flex;
   justify-content: center;
@@ -485,18 +494,26 @@ body {
   letter-spacing: 3px;
 }
 
-/* Token bar */
 .token-bar {
   padding: 2px 12px;
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
   font-size: 10px;
   color: var(--vscode-descriptionForeground);
   flex-shrink: 0;
 }
+.token-model {
+  color: #4ec994;
+  font-size: 10px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .token-total { opacity: 0.7; }
 
-/* States */
 .skeleton {
   flex: 1;
   padding: 20px 12px;
