@@ -1,75 +1,70 @@
+import { RequestConfig } from "../config";
 import { createGrokClient, ChatMessage } from "../api/grok-client";
-import { GrokConfig, SINGLE_MODEL, MULTI_AGENT_MODEL } from "../config";
 
 export type WebviewMessage =
-  | { type: "sendMessage"; text: string; withCodebase?: boolean }
+  | { type: "sendMessage"; text: string; withCodebase: boolean; selectedModelIndex: number }
   | { type: "stopGeneration" }
-  | { type: "updateConfig"; config: Partial<GrokConfig> };
+  | { type: "newChat" }
+  | { type: "readCodebase" }
+  | { type: "saveSettings"; models: Array<{ title: string; modelId: string; apiKey: string }> }
+  | { type: "saveChatHeight"; height: number };
 
 export interface HandlerContext {
-  apiKey: string | undefined;
   messages: ChatMessage[];
-  config: GrokConfig;
   abortController: AbortController | undefined;
   postMessage: (msg: unknown) => void;
   setAbortController: (ac: AbortController | undefined) => void;
-  updateConfig: (partial: Partial<GrokConfig>) => void;
-  readWorkspaceFiles: () => Promise<{ text: string; fileCount: number }>;
+  getRequestConfig: (index: number) => RequestConfig | null;
+  getCachedCodebase: () => string | null;
 }
 
 export function handleMessage(msg: WebviewMessage, ctx: HandlerContext) {
   switch (msg.type) {
     case "sendMessage":
-      return handleSend(msg.text, msg.withCodebase ?? false, ctx);
+      return handleSend(msg.text, msg.withCodebase, msg.selectedModelIndex, ctx);
     case "stopGeneration":
       ctx.abortController?.abort();
       ctx.setAbortController(undefined);
       return;
-    case "updateConfig": {
-      const update = { ...msg.config };
-      if ("multiAgent" in update) {
-        update.model = update.multiAgent ? MULTI_AGENT_MODEL : SINGLE_MODEL;
-      }
-      ctx.updateConfig(update);
-      return;
-    }
+    // newChat, readCodebase, saveSettings, saveChatHeight handled in chat-provider
   }
 }
 
-async function handleSend(text: string, withCodebase: boolean, ctx: HandlerContext) {
-  if (!ctx.apiKey) {
+async function handleSend(
+  text: string,
+  withCodebase: boolean,
+  selectedModelIndex: number,
+  ctx: HandlerContext
+) {
+  const requestConfig = ctx.getRequestConfig(selectedModelIndex);
+  if (!requestConfig) {
     ctx.postMessage({
       type: "error",
-      message: "No API key set. Run 'GrokForge: Set xAI API Key' from the command palette.",
+      message: "Invalid model selection. Please reload the panel.",
     });
     return;
   }
 
   let messageContent = text;
-
   if (withCodebase) {
-    ctx.postMessage({ type: "loadingFiles" });
-    const { text: filesText, fileCount } = await ctx.readWorkspaceFiles();
-    if (filesText) {
-      messageContent = `Here is the current workspace codebase (${fileCount} files):\n\n${filesText}\n\n---\n\n${text}`;
-      ctx.postMessage({ type: "filesLoaded", fileCount });
-    } else {
-      ctx.postMessage({ type: "filesLoaded", fileCount: 0 });
+    const codebaseText = ctx.getCachedCodebase();
+    if (codebaseText) {
+      messageContent = `Here is the current workspace codebase:\n\n${codebaseText}\n\n---\n\n${text}`;
     }
   }
 
   ctx.messages.push({ role: "user", content: messageContent });
-  ctx.postMessage({ type: "userMessage", text }); // show original text in UI, not the full blob
+  ctx.postMessage({ type: "userMessage", text }); // show original text, not the codebase blob
 
   const ac = new AbortController();
   ctx.setAbortController(ac);
   ctx.postMessage({ type: "assistantStart" });
 
   let accumulated = "";
-  let settled = false; // true after onFinish or onError
+  let settled = false;
 
-  const client = createGrokClient(ctx.apiKey);
-  await client.chat(ctx.messages, ctx.config, {
+  const client = createGrokClient(requestConfig.apiKey);
+  await client.chat(ctx.messages, requestConfig, {
     onText(delta) {
       accumulated += delta;
       ctx.postMessage({ type: "assistantDelta", delta });
@@ -85,21 +80,21 @@ async function handleSend(text: string, withCodebase: boolean, ctx: HandlerConte
     },
     onError(error) {
       settled = true;
-      ctx.messages.pop(); // remove the user message — conversation never completed
+      // Spec §7: user message stays in history so the user can retry by resending.
+      // Do NOT pop the user message here.
       ctx.postMessage({ type: "error", message: error.message });
-      ctx.postMessage({ type: "assistantEnd" }); // clears isStreaming in webview
+      ctx.postMessage({ type: "assistantEnd" });
       ctx.setAbortController(undefined);
     },
   }, ac.signal);
 
-  // Aborted path: client returns early without calling onFinish or onError
+  // Aborted path: client returns without calling onFinish or onError
   if (!settled) {
-    ctx.messages.pop(); // remove user message
+    ctx.messages.pop();
     if (accumulated) {
-      // Keep partial response so the user can see what came back before stopping
       ctx.messages.push({ role: "assistant", content: accumulated });
     }
-    ctx.postMessage({ type: "assistantEnd" }); // clears isStreaming
+    ctx.postMessage({ type: "assistantEnd" });
     ctx.setAbortController(undefined);
   }
 }

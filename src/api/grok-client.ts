@@ -1,4 +1,4 @@
-import { GrokConfig } from "../config";
+import { RequestConfig } from "../config";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -17,20 +17,16 @@ const XAI_RESPONSES_URL = "https://api.x.ai/v1/responses";
 export function createGrokClient(apiKey: string) {
   async function chat(
     messages: ChatMessage[],
-    config: GrokConfig,
+    config: RequestConfig,
     callbacks: StreamCallbacks,
     abortSignal?: AbortSignal
   ) {
     const body: Record<string, unknown> = {
-      model: config.model,
+      model: config.modelId,
       input: messages.map((m) => ({ role: m.role, content: m.content })),
       stream: true,
       store: config.store,
     };
-
-    if (config.tools.length > 0) {
-      body.tools = config.tools.map((name) => ({ type: name }));
-    }
 
     let response: Response;
     try {

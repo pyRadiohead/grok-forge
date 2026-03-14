@@ -9,19 +9,6 @@ export function activate(context: vscode.ExtensionContext) {
       webviewOptions: { retainContextWhenHidden: true },
     }),
 
-    vscode.commands.registerCommand("grokforge.setApiKey", async () => {
-      const key = await vscode.window.showInputBox({
-        prompt: "Enter your xAI API key",
-        password: true,
-        ignoreFocusOut: true,
-      });
-      if (key) {
-        await context.secrets.store("grokforge.apiKey", key);
-        chatProvider.onApiKeyChanged();
-        vscode.window.showInformationMessage("GrokForge: API key saved.");
-      }
-    }),
-
     vscode.commands.registerCommand("grokforge.newChat", () => {
       chatProvider.newChat();
     })

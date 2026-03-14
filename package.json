@@ -36,10 +36,6 @@
     },
     "commands": [
       {
-        "command": "grokforge.setApiKey",
-        "title": "GrokForge: Set xAI API Key"
-      },
-      {
         "command": "grokforge.newChat",
         "title": "GrokForge: New Chat"
       }
