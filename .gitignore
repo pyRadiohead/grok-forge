@@ -17,3 +17,6 @@ Thumbs.db
 # Editor
 *.swp
 *.swo
+
+# Git worktrees
+.worktrees/
