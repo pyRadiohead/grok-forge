@@ -3,6 +3,8 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 import ChatMessage from "./components/ChatMessage.vue";
 import InputBox from "./components/InputBox.vue";
 import SettingsView from "./components/SettingsView.vue";
+import HistoryView from "./components/HistoryView.vue";
+import type { ChatSession } from "../config";
 
 interface ModelConfig {
   title: string;
@@ -26,10 +28,14 @@ interface Usage {
 const vscode = acquireVsCodeApi();
 
 // View state
-const view = ref<"chat" | "settings">("chat");
+const view = ref<"chat" | "settings" | "history">("chat");
 const modelsReady = ref(false);
 const models = ref<ModelConfig[]>([]);
 const selectedModelIndex = ref<number | null>(null);
+
+// Sessions state
+const sessions = ref<ChatSession[]>([]);
+const activeSessionId = ref<string | null>(null);
 
 // Chat state
 const messages = ref<Message[]>([]);
@@ -147,6 +153,20 @@ function onSaveSettings(payload: { models: Array<{ title: string; modelId: strin
   view.value = "chat";
 }
 
+// Session handlers
+function onLoadSession(id: string) {
+  vscode.postMessage({ type: "loadSession", sessionId: id });
+  view.value = "chat";
+}
+
+function onDeleteSession(id: string) {
+  vscode.postMessage({ type: "deleteSession", sessionId: id });
+}
+
+function onRenameSession(id: string, title: string) {
+  vscode.postMessage({ type: "renameSession", sessionId: id, title });
+}
+
 // Message handler from extension host
 function handleExtensionMessage(event: MessageEvent) {
   const msg = event.data;
@@ -224,6 +244,28 @@ function handleExtensionMessage(event: MessageEvent) {
       codebaseFileCount.value = 0;
       codebaseError.value = null;
       break;
+    case "sessionsLoaded":
+      sessions.value = msg.sessions ?? [];
+      activeSessionId.value = msg.activeSessionId ?? null;
+      break;
+    case "sessionLoaded": {
+      // Full UI state reset on session load
+      error.value = null;
+      lastUsage.value = null;
+      sessionTotal.value = { promptTokens: 0, completionTokens: 0 };
+      isGenerating.value = false;
+      withCodebase.value = false;
+      codebaseFileCount.value = 0;
+      codebaseWorkspaceName.value = "";
+      codebaseError.value = null;
+      messages.value = (msg.messages ?? []).map((m: { role: "user" | "assistant"; content: string; reasoning?: string }) => ({
+        ...m,
+        isStreaming: false,
+      }));
+      activeSessionId.value = msg.sessionId;
+      scrollToBottom();
+      break;
+    }
   }
 }
 
@@ -253,17 +295,18 @@ onBeforeUnmount(() => {
 <template>
   <div class="app" ref="panelContainer">
 
-    <!-- Header: always visible, two states -->
+    <!-- Header: always visible, three states -->
     <header class="header">
       <span class="header-title">GrokForge</span>
       <div class="header-actions">
         <template v-if="view === 'chat'">
-          <button class="header-btn" @click="onNewChat">+ New Chat</button>
+          <button class="header-btn" @click="view = 'history'" title="Chat history">☰</button>
+          <button class="header-btn" @click="onNewChat">+ New</button>
           <button
             class="header-btn"
             :class="{ highlighted: modelsReady && !hasModels }"
             @click="view = 'settings'"
-          >⚙ Settings</button>
+          >⚙</button>
         </template>
         <template v-else>
           <button class="header-btn" @click="view = 'chat'">← Back</button>
@@ -348,9 +391,20 @@ onBeforeUnmount(() => {
 
     <!-- Settings view -->
     <SettingsView
-      v-else
+      v-else-if="view === 'settings'"
       :models="models"
       @save-settings="onSaveSettings"
+      @back="view = 'chat'"
+    />
+
+    <!-- History view -->
+    <HistoryView
+      v-else-if="view === 'history'"
+      :sessions="sessions"
+      :active-session-id="activeSessionId"
+      @load-session="onLoadSession"
+      @delete-session="onDeleteSession"
+      @rename-session="onRenameSession"
       @back="view = 'chat'"
     />
 
