@@ -17,10 +17,40 @@ Two-layer system: a global baseline instruction set that applies to every conver
 "grokforge.globalInstructions": string   // default ""
 
 // globalState — existing "grokforge.models" entry gains one field
+// (instructions is persisted alongside title/modelId, NOT in secrets)
 interface ModelMeta {
   title: string;
   modelId: string;
   instructions?: string;   // per-model override, default ""
+}
+```
+
+`handleSaveSettings` must persist both layers:
+
+```ts
+// 1. Write globalInstructions
+await this.context.globalState.update("grokforge.globalInstructions", msg.globalInstructions);
+
+// 2. Write model meta (title + modelId + instructions — no API keys here)
+await this.context.globalState.update(
+  "grokforge.models",
+  incomingModels.map(({ title, modelId, instructions }) => ({ title, modelId, instructions }))
+);
+```
+
+`globalInstructions` is loaded once at startup into an instance field (`private globalInstructions = ""`) and refreshed at the end of `handleSaveSettings` (before calling `loadAndSendModels`). This avoids async reads on every message send.
+
+### ModelConfig (src/config.ts)
+
+`ModelConfig` gains `instructions` so the runtime model array can carry it to `getRequestConfig`:
+
+```ts
+export interface ModelConfig {
+  title: string;
+  modelId: string;
+  apiKey: string;
+  unconfigured?: boolean;
+  instructions?: string;   // loaded from globalState alongside title/modelId
 }
 ```
 
@@ -32,18 +62,42 @@ export interface RequestConfig {
   apiKey: string;
   store: false;
   tools?: string[];
-  systemPrompt?: string;   // assembled: global + model-specific
+  systemPrompt?: string;   // assembled: global + model-specific; undefined if both empty
 }
 ```
 
 ### Assembly (chat-provider.ts — getRequestConfig)
 
+`getRequestConfig` reads from the `globalInstructions` instance field and the model's `instructions` field:
+
 ```ts
+getRequestConfig(index: number): RequestConfig | null {
+  const model = this.models[index];
+  if (!model) return null;
+  const systemPrompt = buildSystemPrompt(this.globalInstructions, model.instructions ?? "") ?? undefined;
+  return { modelId: model.modelId, apiKey: model.apiKey, store: false, systemPrompt };
+}
+
 function buildSystemPrompt(global: string, modelSpecific: string): string | null {
   const parts = [global, modelSpecific].map(s => s.trim()).filter(Boolean);
   return parts.length > 0 ? parts.join("\n\n") : null;
 }
 ```
+
+### modelsLoaded message
+
+The extension-host-to-webview `modelsLoaded` message must include `globalInstructions` so the webview can pre-populate the Settings textarea on open:
+
+```ts
+this.postMessage({
+  type: "modelsLoaded",
+  models,
+  chatHeight: storedHeight,
+  globalInstructions: this.globalInstructions,
+});
+```
+
+`App.vue` stores `globalInstructions` in a `ref<string>` and passes it to `SettingsView` as a prop. `SettingsView` initialises its local `globalInstructions` ref from that prop when mounted.
 
 ### API injection (grok-client.ts)
 
@@ -98,9 +152,13 @@ The existing `saveSettings` webview message is extended:
 }
 ```
 
+### Template replacement behaviour
+
+Selecting a template loads its text into the active textarea, replacing current content. No confirmation dialog — browser-native textarea undo (Ctrl+Z) restores the prior text because Vue's `v-model` binding preserves DOM undo history.
+
 ## Template Library
 
-Six built-in templates, hardcoded in the extension. Selecting a template loads its text into the active textarea (replaces current content). Templates appear in both the global and per-model dropdowns.
+Six built-in templates, hardcoded in `src/webview/prompts.ts`. Selecting a template replaces the textarea content. Templates appear in both the global and per-model dropdowns.
 
 ### 1. Coding assistant
 ```
@@ -161,14 +219,14 @@ You are a multi-agent investigator. When given a complex problem:
 
 | File | Change |
 |---|---|
-| `src/config.ts` | Add `systemPrompt?: string` to `RequestConfig` |
-| `src/chat/chat-provider.ts` | Load `globalInstructions` from globalState; pass to `getRequestConfig`; handle new `saveSettings` shape |
-| `src/chat/message-handler.ts` | Update `saveSettings` WebviewMessage type |
-| `src/api/grok-client.ts` | Prepend system message when `config.systemPrompt` is set |
-| `src/webview/components/SettingsView.vue` | Global instructions section + per-model expandable section + template dropdown |
-| `src/webview/App.vue` | Pass `globalInstructions` in `saveSettings` postMessage |
+| `src/config.ts` | Add `instructions?: string` to `ModelConfig`; add `systemPrompt?: string` to `RequestConfig` |
+| `src/chat/chat-provider.ts` | Add `globalInstructions` instance field; load from globalState on startup; persist in `handleSaveSettings`; assemble in `getRequestConfig`; include in `modelsLoaded` message |
+| `src/chat/message-handler.ts` | Update `saveSettings` WebviewMessage type to include `globalInstructions` and `instructions` per model |
+| `src/api/grok-client.ts` | Prepend `{ role: "system" }` item to `input` when `config.systemPrompt` is set |
+| `src/webview/components/SettingsView.vue` | Add `globalInstructions` prop + textarea; add `instructions` textarea per model row (collapsed); add template dropdown for both |
+| `src/webview/App.vue` | Store `globalInstructions` ref from `modelsLoaded`; pass as prop to `SettingsView`; include in `saveSettings` postMessage |
 
-New file: `src/webview/prompts.ts` — exports the `TEMPLATES` array (name + content pairs). Imported by `SettingsView.vue` only.
+New file: `src/webview/prompts.ts` — exports `TEMPLATES: Array<{ name: string; content: string }>`. Imported by `SettingsView.vue` only.
 
 ## Vertex AI Upgrade Path
 
