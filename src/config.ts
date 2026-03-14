@@ -10,3 +10,20 @@ export interface RequestConfig {
   apiKey: string;
   store: false; // instructs xAI not to store conversation server-side; always false
 }
+
+export interface StoredMessage {
+  role: "user" | "assistant";
+  content: string;
+  // content stores the raw user-typed text (the `text` field of the sendMessage
+  // webview message), NOT the codebase-prefixed messageContent. This prevents
+  // giant codebase blobs being stored per-message.
+  reasoning?: string;
+  // isStreaming intentionally omitted — runtime-only field
+}
+
+export interface ChatSession {
+  id: string;          // Date.now().toString() — unique enough, sortable
+  title: string;       // Auto-set from first raw user text (≤40 chars + "…"), user-editable
+  createdAt: number;   // Unix ms timestamp
+  messages: StoredMessage[];
+}
