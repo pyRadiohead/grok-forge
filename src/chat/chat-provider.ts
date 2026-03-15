@@ -16,6 +16,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private abortController?: AbortController;
   private sessions: ChatSession[] = [];
   private activeSessionId: string | undefined = undefined;
+  private globalInstructions = "";
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -88,19 +89,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   getRequestConfig(index: number): RequestConfig | null {
     const model = this.models[index];
     if (!model) return null;
-    return { modelId: model.modelId, apiKey: model.apiKey, store: false };
+    const assembled = buildSystemPrompt(this.globalInstructions, model.instructions ?? "");
+    const systemPrompt = assembled ?? undefined;
+    return { modelId: model.modelId, apiKey: model.apiKey, store: false, systemPrompt };
   }
 
   private async loadAndSendModels() {
     const storedHeight: number | undefined = this.context.globalState.get("grokforge.chatHeight");
 
+    // Load globalInstructions once per startup (refreshed after save)
+    this.globalInstructions = this.context.globalState.get<string>("grokforge.globalInstructions") ?? "";
+
     const timeoutHandle = setTimeout(() => {
-      this.postMessage({ type: "modelsLoaded", models: [], chatHeight: storedHeight });
+      this.postMessage({ type: "modelsLoaded", models: [], chatHeight: storedHeight, globalInstructions: this.globalInstructions });
       this.sendSessionsLoaded();
     }, 5000);
 
     try {
-      const modelMeta: Array<{ title: string; modelId: string }> =
+      const modelMeta: Array<{ title: string; modelId: string; instructions?: string }> =
         this.context.globalState.get("grokforge.models") ?? [];
 
       const models: ModelConfig[] = await Promise.all(
@@ -117,17 +123,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           } catch {
             unconfigured = true;
           }
-          return { title: m.title, modelId: m.modelId, apiKey, unconfigured: unconfigured ? true : undefined };
+          return { title: m.title, modelId: m.modelId, apiKey, unconfigured: unconfigured ? true : undefined, instructions: m.instructions };
         })
       );
 
       clearTimeout(timeoutHandle);
       this.models = models;
-      this.postMessage({ type: "modelsLoaded", models, chatHeight: storedHeight });
+      this.postMessage({ type: "modelsLoaded", models, chatHeight: storedHeight, globalInstructions: this.globalInstructions });
       this.sendSessionsLoaded();
     } catch {
       clearTimeout(timeoutHandle);
-      this.postMessage({ type: "modelsLoaded", models: [], chatHeight: storedHeight });
+      this.postMessage({ type: "modelsLoaded", models: [], chatHeight: storedHeight, globalInstructions: this.globalInstructions });
       this.sendSessionsLoaded();
     }
   }
@@ -141,7 +147,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.handleReadCodebase();
         return;
       case "saveSettings":
-        await this.handleSaveSettings(msg.models);
+        await this.handleSaveSettings(msg.globalInstructions, msg.models);
         return;
       case "saveChatHeight":
         await this.context.globalState.update("grokforge.chatHeight", msg.height);
@@ -217,29 +223,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleSaveSettings(
-    incomingModels: Array<{ title: string; modelId: string; apiKey: string }>
+    globalInstructions: string,
+    incomingModels: Array<{ title: string; modelId: string; apiKey: string; instructions: string }>
   ) {
     const previousCount: number =
       (this.context.globalState.get<Array<unknown>>("grokforge.models") ?? []).length;
     const newCount = incomingModels.length;
 
-    // 1. Write globalState first (minimises corruption window)
+    // 1. Persist globalInstructions
+    await this.context.globalState.update("grokforge.globalInstructions", globalInstructions);
+    this.globalInstructions = globalInstructions;
+
+    // 2. Write globalState (title + modelId + instructions — no API keys here)
     await this.context.globalState.update(
       "grokforge.models",
-      incomingModels.map(({ title, modelId }) => ({ title, modelId }))
+      incomingModels.map(({ title, modelId, instructions }) => ({ title, modelId, instructions }))
     );
 
-    // 2. Write API keys in display order
+    // 3. Write API keys in display order
     for (let i = 0; i < newCount; i++) {
       await this.context.secrets.store(`grokforge.apiKey.${i}`, incomingModels[i].apiKey);
     }
 
-    // 3. Delete orphaned tail keys
+    // 4. Delete orphaned tail keys
     for (let i = newCount; i < previousCount; i++) {
       await this.context.secrets.delete(`grokforge.apiKey.${i}`);
     }
 
-    // 4. Reload and send updated model list to webview
+    // 5. Reload and send updated model list to webview
     await this.loadAndSendModels();
   }
 
@@ -374,6 +385,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+function buildSystemPrompt(global: string, modelSpecific: string): string | null {
+  const parts = [global, modelSpecific].map(s => s.trim()).filter(Boolean);
+  return parts.length > 0 ? parts.join("\n\n") : null;
 }
 
 function getNonce(): string {

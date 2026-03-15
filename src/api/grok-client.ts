@@ -22,9 +22,14 @@ export function createGrokClient(apiKey: string) {
     callbacks: StreamCallbacks,
     abortSignal?: AbortSignal
   ) {
+    const inputMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+    const input = config.systemPrompt
+      ? [{ role: "system", content: config.systemPrompt }, ...inputMessages]
+      : inputMessages;
+
     const body: Record<string, unknown> = {
       model: config.modelId,
-      input: messages.map((m) => ({ role: m.role, content: m.content })),
+      input,
       stream: true,
       store: config.store,
     };

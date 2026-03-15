@@ -3,6 +3,7 @@ export interface ModelConfig {
   modelId: string;
   apiKey: string;         // "" if missing/unconfigured
   unconfigured?: boolean; // true when apiKey was absent/empty at load or save time
+  instructions?: string;  // per-model system prompt override, loaded from globalState
 }
 
 export interface RequestConfig {
@@ -10,6 +11,7 @@ export interface RequestConfig {
   apiKey: string;
   store: false; // instructs xAI not to store conversation server-side; always false
   tools?: string[]; // server-side tool names: web_search, x_search, code_execution
+  systemPrompt?: string; // assembled: global + model-specific; undefined if both empty
 }
 
 export interface StoredMessage {

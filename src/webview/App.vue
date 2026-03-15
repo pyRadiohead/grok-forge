@@ -54,6 +54,9 @@ const codebaseError = ref<string | null>(null);
 // Tools state
 const toolsEnabled = ref(false);
 
+// Custom instructions (global layer) — populated from modelsLoaded, passed to SettingsView
+const globalInstructions = ref("");
+
 // Drag handle
 const chatContainer = ref<HTMLElement | null>(null);
 const panelContainer = ref<HTMLElement | null>(null);
@@ -152,8 +155,8 @@ function onModelChange(index: number) {
 }
 
 // Settings handlers
-function onSaveSettings(payload: { models: Array<{ title: string; modelId: string; apiKey: string }> }) {
-  vscode.postMessage({ type: "saveSettings", models: payload.models });
+function onSaveSettings(payload: { globalInstructions: string; models: Array<{ title: string; modelId: string; apiKey: string; instructions: string }> }) {
+  vscode.postMessage({ type: "saveSettings", globalInstructions: payload.globalInstructions, models: payload.models });
   view.value = "chat";
 }
 
@@ -178,6 +181,7 @@ function handleExtensionMessage(event: MessageEvent) {
   switch (msg.type) {
     case "modelsLoaded": {
       models.value = msg.models ?? [];
+      if (msg.globalInstructions !== undefined) globalInstructions.value = msg.globalInstructions;
       modelsReady.value = true;
       selectedModelIndex.value = models.value.length > 0 ? 0 : null;
       if (msg.chatHeight !== undefined) {
@@ -368,9 +372,9 @@ onBeforeUnmount(() => {
           <span class="drag-dots">• • •</span>
         </div>
 
-        <div v-if="hasModels" class="token-bar">
+        <div v-if="hasModels && (lastModelId || lastUsage)" class="token-bar">
+          <span v-if="lastModelId" class="token-model">{{ lastModelId }}</span>
           <template v-if="lastUsage">
-            <span v-if="lastModelId" class="token-model">{{ lastModelId }}</span>
             ↑{{ lastUsage.promptTokens.toLocaleString() }}
             ↓{{ lastUsage.completionTokens.toLocaleString() }} tokens
             <span class="token-total">
@@ -385,6 +389,7 @@ onBeforeUnmount(() => {
     <SettingsView
       v-else-if="view === 'settings'"
       :models="models"
+      :global-instructions="globalInstructions"
       @save-settings="onSaveSettings"
       @back="view = 'chat'"
     />

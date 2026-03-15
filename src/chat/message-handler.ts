@@ -6,7 +6,7 @@ export type WebviewMessage =
   | { type: "stopGeneration" }
   | { type: "newChat" }
   | { type: "readCodebase" }
-  | { type: "saveSettings"; models: Array<{ title: string; modelId: string; apiKey: string }> }
+  | { type: "saveSettings"; globalInstructions: string; models: Array<{ title: string; modelId: string; apiKey: string; instructions: string }> }
   | { type: "saveChatHeight"; height: number }
   | { type: "loadSession"; sessionId: string }
   | { type: "deleteSession"; sessionId: string }
